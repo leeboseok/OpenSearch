@@ -196,6 +196,23 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
         super.testUnknownField();
     }
 
+    @Override
+    public void testToQuery() throws IOException {
+        TermsQueryBuilder queryBuilder = new TermsQueryBuilder(TEXT_FIELD_NAME, new TermsLookup("some_index", "some_id", "some_path"));
+        QueryShardContext context = createShardContext();
+
+        UnsupportedOperationException e = expectThrows(UnsupportedOperationException.class, () -> queryBuilder.toQuery(context));
+        assertEquals("query must be rewritten first", e.getMessage());
+    }
+
+    @Override
+    public void testCacheability() throws IOException {
+        TermsQueryBuilder queryBuilder = new TermsQueryBuilder(TEXT_FIELD_NAME, new TermsLookup("some_index", "some_id", "some_path"));
+        QueryShardContext context = createShardContext();
+        UnsupportedOperationException e = expectThrows(UnsupportedOperationException.class, () -> queryBuilder.toQuery(context));
+        assertEquals("query must be rewritten first", e.getMessage());
+    }
+
     public void testEmptyFieldName() {
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> new TermsQueryBuilder(null, "term"));
         assertEquals("field name cannot be null.", e.getMessage());
@@ -488,6 +505,15 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
         complement = queryBuilder.getComplement(createShardContext(searcher));
         assertEquals(complement, expectedComplement);
 
+        // Test multiple consecutive values
+        queryBuilder = new TermsQueryBuilder(INT_FIELD_NAME, List.of("1", "2", "3"));
+        complement = queryBuilder.getComplement(createShardContext(searcher));
+        expectedComplement = List.of(
+            new RangeQueryBuilder(INT_FIELD_NAME).to(1).includeLower(true).includeUpper(false),
+            new RangeQueryBuilder(INT_FIELD_NAME).from(3).includeLower(false).includeUpper(true)
+        );
+        assertEquals(complement, expectedComplement);
+
         // If zero values, we should get null
         queryBuilder = new TermsQueryBuilder(INT_FIELD_NAME, List.of());
         complement = queryBuilder.getComplement(createShardContext(searcher));
@@ -543,7 +569,6 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
     }
 
     public void testGetComplementValuesLookup() throws Exception {
-        // Complement should return null if the builder has termsLookup instead of values specified
         Directory dir = newDirectory();
         IndexWriter w = new IndexWriter(dir, newIndexWriterConfig(new StandardAnalyzer()));
         DirectoryReader reader = DirectoryReader.open(w);

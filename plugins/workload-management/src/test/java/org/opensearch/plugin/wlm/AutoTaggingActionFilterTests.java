@@ -11,12 +11,16 @@ package org.opensearch.plugin.wlm;
 import org.opensearch.action.ActionRequest;
 import org.opensearch.action.admin.cluster.node.tasks.cancel.CancelTasksRequest;
 import org.opensearch.action.search.SearchRequest;
+import org.opensearch.action.search.SearchScrollRequest;
 import org.opensearch.action.support.ActionFilterChain;
+import org.opensearch.action.support.ActionRequestMetadata;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.rule.InMemoryRuleProcessingService;
+import org.opensearch.rule.RuleAttribute;
+import org.opensearch.rule.attribute_extractor.AttributeExtractor;
 import org.opensearch.rule.autotagging.Attribute;
 import org.opensearch.rule.autotagging.FeatureType;
 import org.opensearch.rule.storage.AttributeValueStoreFactory;
@@ -28,10 +32,15 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.wlm.WorkloadGroupTask;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.anyList;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -51,8 +60,14 @@ public class AutoTaggingActionFilterTests extends OpenSearchTestCase {
             WLMFeatureType.WLM,
             DefaultAttributeValueStore::new
         );
-        ruleProcessingService = spy(new InMemoryRuleProcessingService(attributeValueStoreFactory));
-        autoTaggingActionFilter = new AutoTaggingActionFilter(ruleProcessingService, threadPool);
+        ruleProcessingService = spy(new InMemoryRuleProcessingService(attributeValueStoreFactory, null));
+        autoTaggingActionFilter = new AutoTaggingActionFilter(
+            ruleProcessingService,
+            threadPool,
+            new HashMap<>(),
+            mock(WlmClusterSettingValuesProvider.class),
+            WLMFeatureType.WLM
+        );
     }
 
     public void tearDown() throws Exception {
@@ -70,7 +85,7 @@ public class AutoTaggingActionFilterTests extends OpenSearchTestCase {
         when(request.indices()).thenReturn(new String[] { "foo" });
         try (ThreadContext.StoredContext context = threadPool.getThreadContext().stashContext()) {
             when(ruleProcessingService.evaluateLabel(anyList())).thenReturn(Optional.of("TestQG_ID"));
-            autoTaggingActionFilter.apply(mock(Task.class), "Test", request, null, mockFilterChain);
+            autoTaggingActionFilter.apply(mock(Task.class), "Test", request, ActionRequestMetadata.empty(), null, mockFilterChain);
 
             assertEquals("TestQG_ID", threadPool.getThreadContext().getHeader(WorkloadGroupTask.WORKLOAD_GROUP_ID_HEADER));
             verify(ruleProcessingService, times(1)).evaluateLabel(anyList());
@@ -80,9 +95,42 @@ public class AutoTaggingActionFilterTests extends OpenSearchTestCase {
     public void testApplyForInValidRequest() {
         ActionFilterChain<ActionRequest, ActionResponse> mockFilterChain = mock(TestActionFilterChain.class);
         CancelTasksRequest request = new CancelTasksRequest();
-        autoTaggingActionFilter.apply(mock(Task.class), "Test", request, null, mockFilterChain);
+        autoTaggingActionFilter.apply(mock(Task.class), "Test", request, ActionRequestMetadata.empty(), null, mockFilterChain);
 
         verify(ruleProcessingService, times(0)).evaluateLabel(anyList());
+    }
+
+    public void testApplyForScrollRequestWithOriginalIndices() {
+        SearchScrollRequest request = mock(SearchScrollRequest.class);
+        ActionFilterChain<ActionRequest, ActionResponse> chain = mock(TestActionFilterChain.class);
+
+        @SuppressWarnings("unchecked")
+        ActionRequestMetadata<ActionRequest, ActionResponse> metadata = mock(ActionRequestMetadata.class);
+        when(request.originalIndicesOrEmpty()).thenReturn(new String[] { "logs-scroll-index" });
+
+        try (ThreadContext.StoredContext ctx = threadPool.getThreadContext().stashContext()) {
+            doAnswer(inv -> {
+                @SuppressWarnings("unchecked")
+                List<AttributeExtractor<String>> extractors = inv.getArgument(0);
+
+                assertNotNull(extractors);
+                assertEquals(1, extractors.size());
+
+                AttributeExtractor<String> ex = extractors.get(0);
+                assertEquals(RuleAttribute.INDEX_PATTERN, ex.getAttribute());
+
+                List<String> values = new ArrayList<>();
+                ex.extract().forEach(values::add);
+                assertEquals(List.of("logs-scroll-index"), values);
+
+                return Optional.of("ScrollQG_ID");
+            }).when(ruleProcessingService).evaluateLabel(any());
+
+            autoTaggingActionFilter.apply(mock(Task.class), "Test", request, metadata, null, chain);
+
+            assertEquals("ScrollQG_ID", threadPool.getThreadContext().getHeader(WorkloadGroupTask.WORKLOAD_GROUP_ID_HEADER));
+            verify(ruleProcessingService, times(1)).evaluateLabel(anyList());
+        }
     }
 
     public enum WLMFeatureType implements FeatureType {
@@ -94,8 +142,8 @@ public class AutoTaggingActionFilterTests extends OpenSearchTestCase {
         }
 
         @Override
-        public Map<String, Attribute> getAllowedAttributesRegistry() {
-            return Map.of("test_attribute", TestAttribute.TEST_ATTRIBUTE);
+        public Map<Attribute, Integer> getOrderedAttributes() {
+            return Map.of(TestAttribute.TEST_ATTRIBUTE, 1);
         }
     }
 

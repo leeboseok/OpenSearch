@@ -35,11 +35,13 @@ package org.opensearch.rest;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchException;
 import org.opensearch.OpenSearchStatusException;
+import org.opensearch.OpenSearchTimeoutException;
 import org.opensearch.ResourceAlreadyExistsException;
 import org.opensearch.ResourceNotFoundException;
 import org.opensearch.action.OriginalIndices;
 import org.opensearch.action.search.SearchPhaseExecutionException;
 import org.opensearch.action.search.ShardSearchFailure;
+import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.core.common.ParsingException;
 import org.opensearch.core.common.bytes.BytesReference;
@@ -179,10 +181,44 @@ public class BytesRestResponseTests extends OpenSearchTestCase {
         );
         BytesRestResponse response = new BytesRestResponse(channel, new RemoteTransportException("foo", ex));
         String text = response.content().utf8ToString();
-        String expected = "{\"error\":{\"root_cause\":[{\"type\":\"parsing_exception\",\"reason\":\"foobar\",\"line\":1,\"col\":2}],"
-            + "\"type\":\"search_phase_execution_exception\",\"reason\":\"all shards failed\",\"phase\":\"search\",\"grouped\":true,"
-            + "\"failed_shards\":[{\"shard\":1,\"index\":\"foo\",\"node\":\"node_1\",\"reason\":{\"type\":\"parsing_exception\","
-            + "\"reason\":\"foobar\",\"line\":1,\"col\":2}}]},\"status\":400}";
+        String expected = XContentHelper.stripWhitespace("""
+            {
+              "error": {
+                "root_cause": [
+                  {
+                    "type": "parsing_exception",
+                    "reason": "foobar",
+                    "line": 1,
+                    "col": 2
+                  }
+                ],
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed",
+                "phase": "search",
+                "grouped": true,
+                "failed_shards": [
+                  {
+                    "shard": 1,
+                    "index": "foo",
+                    "node": "node_1",
+                    "reason": {
+                      "type": "parsing_exception",
+                      "reason": "foobar",
+                      "line": 1,
+                      "col": 2
+                    }
+                  }
+                ],
+                "caused_by": {
+                  "type": "parsing_exception",
+                  "reason": "foobar",
+                  "line": 1,
+                  "col": 2
+                }
+              },
+              "status": 400
+            }
+            """);
         assertEquals(expected.trim(), text.trim());
         String stackTrace = ExceptionsHelper.stackTrace(ex);
         assertTrue(stackTrace.contains("Caused by: ParsingException[foobar]"));
@@ -211,6 +247,17 @@ public class BytesRestResponseTests extends OpenSearchTestCase {
         assertThat(content, containsString("\"type\":\"exception\""));
         assertThat(content, containsString("\"reason\":\"simulated\""));
         assertThat(content, containsString("\"status\":" + 500));
+    }
+
+    public void testResponseWhenTimeoutException() throws IOException {
+        final RestRequest request = new FakeRestRequest();
+        final RestChannel channel = new DetailedExceptionRestChannel(request);
+        final BytesRestResponse response = new BytesRestResponse(channel, new OpenSearchTimeoutException("simulated timeout"));
+        assertEquals(RestStatus.GATEWAY_TIMEOUT, response.status());
+        assertNotNull(response.content());
+        final String content = response.content().utf8ToString();
+        assertThat(content, containsString("\"reason\":\"simulated timeout\""));
+        assertThat(content, containsString("\"status\":" + 504));
     }
 
     public void testErrorToAndFromXContent() throws IOException {

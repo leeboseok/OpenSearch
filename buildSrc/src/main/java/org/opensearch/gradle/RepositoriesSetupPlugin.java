@@ -82,7 +82,17 @@ public class RepositoriesSetupPlugin implements Plugin<Project> {
             // such that we don't have to pass hardcoded files to gradle
             repos.mavenLocal();
         }
-        repos.mavenCentral();
+        repos.maven(repo -> {
+            repo.setName("Maven Cache");
+            repo.setUrl("https://ci.opensearch.org/maven2/");
+            repo.content(descriptor -> descriptor.excludeGroupByRegex("adoptium.*|adoptopenjdk.*|openjdk.*"));
+        });
+        repos.maven(repo -> {
+            repo.setName("Plugin Mirror");
+            repo.setUrl("https://ci.opensearch.org/m2/");
+            repo.content(descriptor -> descriptor.excludeGroupByRegex("adoptium.*|adoptopenjdk.*|openjdk.*"));
+        });
+        repos.mavenCentral(repo -> { repo.content(descriptor -> descriptor.excludeGroupByRegex("adoptium.*|adoptopenjdk.*|openjdk.*")); });
 
         String luceneVersion = VersionProperties.getLucene();
         if (luceneVersion.contains("-snapshot")) {

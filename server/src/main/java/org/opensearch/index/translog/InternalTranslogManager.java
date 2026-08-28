@@ -21,6 +21,7 @@ import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.translog.listener.TranslogEventListener;
 import org.opensearch.index.translog.transfer.TranslogUploadFailedException;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -58,7 +59,8 @@ public class InternalTranslogManager implements TranslogManager {
         TranslogEventListener translogEventListener,
         LifecycleAware engineLifeCycleAware,
         TranslogFactory translogFactory,
-        BooleanSupplier startedPrimarySupplier
+        BooleanSupplier startedPrimarySupplier,
+        TranslogOperationHelper translogOperationHelper
     ) throws IOException {
         this.shardId = shardId;
         this.readLock = readLock;
@@ -71,7 +73,7 @@ public class InternalTranslogManager implements TranslogManager {
             if (tracker != null) {
                 tracker.markSeqNoAsPersisted(seqNo);
             }
-        }, translogUUID, translogFactory, startedPrimarySupplier);
+        }, translogUUID, translogFactory, startedPrimarySupplier, translogOperationHelper);
         assert translog.getGeneration() != null;
         this.translog = translog;
         assert pendingTranslogRecovery.get() == false : "translog recovery can't be pending before we set it";
@@ -368,7 +370,8 @@ public class InternalTranslogManager implements TranslogManager {
         LongConsumer persistedSequenceNumberConsumer,
         String translogUUID,
         TranslogFactory translogFactory,
-        BooleanSupplier startedPrimarySupplier
+        BooleanSupplier startedPrimarySupplier,
+        TranslogOperationHelper translogOperationHelper
     ) throws IOException {
         return translogFactory.newTranslog(
             translogConfig,
@@ -377,7 +380,8 @@ public class InternalTranslogManager implements TranslogManager {
             globalCheckpointSupplier,
             primaryTermSupplier,
             persistedSequenceNumberConsumer,
-            startedPrimarySupplier
+            startedPrimarySupplier,
+            translogOperationHelper
         );
     }
 
@@ -427,6 +431,11 @@ public class InternalTranslogManager implements TranslogManager {
      */
     public String getTranslogUUID() {
         return translog.getTranslogUUID();
+    }
+
+    @Override
+    public Closeable acquireHistoryRetentionLock() {
+        return translog.acquireRetentionLock();
     }
 
     /**

@@ -198,7 +198,11 @@ public class TransportRemoteStoreMetadataAction extends TransportAction<RemoteSt
             IndexMetadata.INDEX_REMOTE_SEGMENT_STORE_REPOSITORY_SETTING.get(indexMetadata.getSettings()),
             index.getUUID(),
             shardId,
-            indexSettings.getRemoteStorePathStrategy()
+            indexSettings.getRemoteStorePathStrategy(),
+            null,
+            RemoteStoreUtils.isServerSideEncryptionEnabledIndex(indexSettings.getIndexMetadata()),
+            false,
+            indexSettings
         );
 
         Map<String, RemoteSegmentMetadata> segmentMetadataMapWithFilenames = remoteDirectory.readLatestNMetadataFiles(5);
@@ -257,7 +261,8 @@ public class TransportRemoteStoreMetadataAction extends TransportAction<RemoteSt
             tracker,
             indexSettings.getRemoteStorePathStrategy(),
             new RemoteStoreSettings(clusterService.getSettings(), clusterService.getClusterSettings()),
-            RemoteStoreUtils.determineTranslogMetadataEnabled(indexMetadata)
+            RemoteStoreUtils.determineTranslogMetadataEnabled(indexMetadata),
+            RemoteStoreUtils.isServerSideEncryptionEnabledIndex(indexSettings.getIndexMetadata())
         );
 
         Map<String, TranslogTransferMetadata> metadataMap = manager.readLatestNMetadataFiles(5);

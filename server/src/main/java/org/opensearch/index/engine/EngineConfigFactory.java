@@ -24,24 +24,33 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.indices.breaker.CircuitBreakerService;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.codec.AdditionalCodecs;
 import org.opensearch.index.codec.CodecService;
 import org.opensearch.index.codec.CodecServiceConfig;
 import org.opensearch.index.codec.CodecServiceFactory;
+import org.opensearch.index.engine.dataformat.DataFormatRegistry;
+import org.opensearch.index.engine.exec.DocumentMetadataResolver;
+import org.opensearch.index.engine.exec.commit.CommitterFactory;
 import org.opensearch.index.mapper.DocumentMapperForType;
 import org.opensearch.index.mapper.MapperService;
+import org.opensearch.index.merge.MergedSegmentTransferTracker;
 import org.opensearch.index.seqno.RetentionLeases;
+import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogDeletionPolicyFactory;
 import org.opensearch.index.translog.TranslogFactory;
+import org.opensearch.plugins.DocumentLookupProvider;
 import org.opensearch.plugins.EnginePlugin;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.threadpool.ThreadPool;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
@@ -55,6 +64,12 @@ import java.util.function.Supplier;
 public class EngineConfigFactory {
     private final CodecServiceFactory codecServiceFactory;
     private final TranslogDeletionPolicyFactory translogDeletionPolicyFactory;
+    private final List<AdditionalCodecs> additionalCodecs;
+    private final CommitterFactory committerFactory;
+    @Nullable
+    private final DocumentLookupProvider documentLookupProvider;
+    @Nullable
+    private final DocumentMetadataResolver documentMetadataResolver;
 
     /** default ctor primarily used for tests without plugins */
     public EngineConfigFactory(IndexSettings idxSettings) {
@@ -68,14 +83,40 @@ public class EngineConfigFactory {
         this(pluginsService.filterPlugins(EnginePlugin.class), idxSettings);
     }
 
-    /* private constructor to construct the factory from specific EnginePlugins and IndexSettings */
+    /**
+     * Factory wiring the optional {@link DocumentLookupProvider} and {@link DocumentMetadataResolver}
+     * (pluggable get-by-id path) into the produced {@link EngineConfig}.
+     */
+    public EngineConfigFactory(
+        PluginsService pluginsService,
+        IndexSettings idxSettings,
+        @Nullable DocumentLookupProvider documentLookupProvider,
+        @Nullable DocumentMetadataResolver documentMetadataResolver
+    ) {
+        this(pluginsService.filterPlugins(EnginePlugin.class), idxSettings, documentLookupProvider, documentMetadataResolver);
+    }
+
+    /* package-private constructor from specific EnginePlugins and IndexSettings without document-lookup wiring */
     EngineConfigFactory(Collection<EnginePlugin> enginePlugins, IndexSettings idxSettings) {
+        this(enginePlugins, idxSettings, null, null);
+    }
+
+    /* private constructor to construct the factory from specific EnginePlugins and IndexSettings */
+    EngineConfigFactory(
+        Collection<EnginePlugin> enginePlugins,
+        IndexSettings idxSettings,
+        @Nullable DocumentLookupProvider documentLookupProvider,
+        @Nullable DocumentMetadataResolver documentMetadataResolver
+    ) {
+        final List<AdditionalCodecs> codecRegistries = new ArrayList<>();
         Optional<CodecService> codecService = Optional.empty();
         String codecServiceOverridingPlugin = null;
         Optional<CodecServiceFactory> codecServiceFactory = Optional.empty();
         String codecServiceFactoryOverridingPlugin = null;
         Optional<TranslogDeletionPolicyFactory> translogDeletionPolicyFactory = Optional.empty();
         String translogDeletionPolicyOverridingPlugin = null;
+        List<CommitterFactory> committerFactories = new ArrayList<>();
+
         for (EnginePlugin enginePlugin : enginePlugins) {
             // get overriding codec service from EnginePlugin
             if (codecService.isPresent() == false) {
@@ -112,6 +153,11 @@ public class EngineConfigFactory {
                         + enginePlugin.getClass().getName()
                 );
             }
+
+            // collect all available CodecRegistry instances
+            enginePlugin.getAdditionalCodecs(idxSettings).ifPresent(codecRegistries::add);
+
+            enginePlugin.getCommitterFactory(idxSettings).ifPresent(committerFactories::add);
         }
 
         if (codecService.isPresent() && codecServiceFactory.isPresent()) {
@@ -123,9 +169,17 @@ public class EngineConfigFactory {
             );
         }
 
+        if (committerFactories.size() > 1 || (committerFactories.isEmpty() && idxSettings.isPluggableDataFormatEnabled())) {
+            throw new IllegalStateException("multiple committer factories found: " + committerFactories);
+        }
+
         final CodecService instance = codecService.orElse(null);
         this.codecServiceFactory = (instance != null) ? (config) -> instance : codecServiceFactory.orElse(null);
         this.translogDeletionPolicyFactory = translogDeletionPolicyFactory.orElse((idxs, rtls) -> null);
+        this.additionalCodecs = Collections.unmodifiableList(codecRegistries);
+        this.committerFactory = committerFactories.isEmpty() ? null : committerFactories.getFirst();
+        this.documentLookupProvider = documentLookupProvider;
+        this.documentMetadataResolver = documentMetadataResolver;
     }
 
     /**
@@ -160,7 +214,11 @@ public class EngineConfigFactory {
         Comparator<LeafReader> leafSorter,
         Supplier<DocumentMapperForType> documentMapperForTypeSupplier,
         IndexWriter.IndexReaderWarmer indexReaderWarmer,
-        ClusterApplierService clusterApplierService
+        ClusterApplierService clusterApplierService,
+        MergedSegmentTransferTracker mergedSegmentTransferTracker,
+        DataFormatRegistry dataFormatRegistry,
+        MapperService mapperService,
+        Map<String, FormatChecksumStrategy> checksumStrategies
     ) {
         CodecService codecServiceToUse = codecService;
         if (codecService == null && this.codecServiceFactory != null) {
@@ -197,7 +255,18 @@ public class EngineConfigFactory {
             .documentMapperForTypeSupplier(documentMapperForTypeSupplier)
             .indexReaderWarmer(indexReaderWarmer)
             .clusterApplierService(clusterApplierService)
+            .mergedSegmentTransferTracker(mergedSegmentTransferTracker)
+            .dataFormatRegistry(dataFormatRegistry)
+            .mapperService(mapperService)
+            .committerFactory(committerFactory)
+            .checksumStrategies(checksumStrategies)
+            .documentLookupProvider(documentLookupProvider)
+            .documentMetadataResolver(documentMetadataResolver)
             .build();
+    }
+
+    public CodecService newDefaultCodecService(IndexSettings indexSettings, @Nullable MapperService mapperService, Logger logger) {
+        return new CodecService(mapperService, indexSettings, logger, additionalCodecs);
     }
 
     public CodecService newCodecServiceOrDefault(
@@ -207,7 +276,7 @@ public class EngineConfigFactory {
         CodecService defaultCodecService
     ) {
         return this.codecServiceFactory != null
-            ? this.codecServiceFactory.createCodecService(new CodecServiceConfig(indexSettings, mapperService, logger))
+            ? this.codecServiceFactory.createCodecService(new CodecServiceConfig(indexSettings, mapperService, logger, additionalCodecs))
             : defaultCodecService;
     }
 }

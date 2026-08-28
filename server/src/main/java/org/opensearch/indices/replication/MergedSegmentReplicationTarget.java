@@ -12,6 +12,7 @@ import org.opensearch.action.StepListener;
 import org.opensearch.common.UUIDs;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.store.StoreFileMetadata;
+import org.opensearch.indices.replication.checkpoint.MergedSegmentCheckpoint;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.ReplicationListener;
 
@@ -32,7 +33,7 @@ public class MergedSegmentReplicationTarget extends AbstractSegmentReplicationTa
         SegmentReplicationSource source,
         ReplicationListener listener
     ) {
-        super("merged_segment_replication_target", indexShard, checkpoint, source, listener);
+        super("merged_segment_replication_target", indexShard, checkpoint, source, false, listener);
     }
 
     @Override
@@ -54,16 +55,30 @@ public class MergedSegmentReplicationTarget extends AbstractSegmentReplicationTa
         List<StoreFileMetadata> filesToFetch,
         StepListener<GetSegmentFilesResponse> getFilesListener
     ) {
-        source.getMergedSegmentFiles(getId(), checkpoint, filesToFetch, indexShard, this::updateFileRecoveryBytes, getFilesListener);
+        source.getMergedSegmentFiles(
+            getId(),
+            checkpoint,
+            filesToFetch,
+            indexShard,
+            this::updateMergedSegmentFileRecoveryBytes,
+            getFilesListener
+        );
     }
 
     @Override
     protected void finalizeReplication(CheckpointInfoResponse checkpointInfoResponse) throws Exception {
+        assert checkpoint instanceof MergedSegmentCheckpoint;
         multiFileWriter.renameAllTempFiles();
+        indexShard.addPendingMergeSegmentCheckpoint((MergedSegmentCheckpoint) checkpoint);
     }
 
     @Override
     public MergedSegmentReplicationTarget retryCopy() {
         return new MergedSegmentReplicationTarget(indexShard, checkpoint, source, listener);
+    }
+
+    protected void updateMergedSegmentFileRecoveryBytes(String fileName, long bytesRecovered) {
+        indexShard.mergedSegmentTransferTracker().addTotalBytesReceived(bytesRecovered);
+        updateFileRecoveryBytes(fileName, bytesRecovered);
     }
 }

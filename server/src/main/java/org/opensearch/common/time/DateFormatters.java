@@ -279,14 +279,14 @@ public class DateFormatters {
             .withResolverStyle(ResolverStyle.STRICT)
     );
 
-    /////////////////////////////////////////
+    // ---------------------------------------
     //
     // BEGIN basic time formatters
     //
     // these formatters to not have any splitting characters between hours, minutes, seconds, milliseconds
     // this means they have to be strict with the exception of the last element
     //
-    /////////////////////////////////////////
+    // ---------------------------------------
 
     private static final DateTimeFormatter BASIC_TIME_NO_MILLIS_BASE = new DateTimeFormatterBuilder().appendValue(
         HOUR_OF_DAY,
@@ -551,17 +551,17 @@ public class DateFormatters {
         .toFormatter(Locale.ROOT)
         .withResolverStyle(ResolverStyle.STRICT);
 
-    /////////////////////////////////////////
+    // ---------------------------------------
     //
     // END basic time formatters
     //
-    /////////////////////////////////////////
+    // ---------------------------------------
 
-    /////////////////////////////////////////
+    // ---------------------------------------
     //
     // start strict formatters
     //
-    /////////////////////////////////////////
+    // ---------------------------------------
     private static final DateTimeFormatter STRICT_BASIC_WEEK_DATE_FORMATTER = new DateTimeFormatterBuilder().parseStrict()
         .appendValue(IsoFields.WEEK_BASED_YEAR, 4)
         .appendLiteral("W")
@@ -1220,17 +1220,17 @@ public class DateFormatters {
      */
     private static final DateFormatter STRICT_ORDINAL_DATE = new JavaDateFormatter("strict_ordinal_date", STRICT_ORDINAL_DATE_FORMATTER);
 
-    /////////////////////////////////////////
+    // ---------------------------------------
     //
     // end strict formatters
     //
-    /////////////////////////////////////////
+    // ---------------------------------------
 
-    /////////////////////////////////////////
+    // ---------------------------------------
     //
     // start lenient formatters
     //
-    /////////////////////////////////////////
+    // ---------------------------------------
 
     private static final DateTimeFormatter DATE_FORMATTER = new DateTimeFormatterBuilder().appendValue(
         ChronoField.YEAR,
@@ -1992,11 +1992,11 @@ public class DateFormatters {
             .withResolverStyle(ResolverStyle.STRICT)
     );
 
-    /////////////////////////////////////////
+    // ---------------------------------------
     //
     // end lenient formatters
     //
-    /////////////////////////////////////////
+    // ---------------------------------------
 
     static DateFormatter forPattern(String input) {
         if (Strings.hasLength(input)) {
@@ -2119,6 +2119,8 @@ public class DateFormatters {
         } else if (FormatNames.EPOCH_MILLIS.matches(input)) {
             return EpochTime.MILLIS_FORMATTER;
             // strict date formats here, must be at least 4 digits for year and two for months and two for day
+        } else if (FormatNames.EPOCH_MICROS.matches(input)) {
+            return EpochTime.MICROS_FORMATTER;
         } else if (FormatNames.STRICT_BASIC_WEEK_DATE.matches(input)) {
             return STRICT_BASIC_WEEK_DATE;
         } else if (FormatNames.STRICT_BASIC_WEEK_DATE_TIME.matches(input)) {

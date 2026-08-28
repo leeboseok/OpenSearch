@@ -95,7 +95,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -729,12 +728,12 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         for (Tuple<Processor, OperationMetrics> processorWithMetric : compoundProcessor.getProcessorsWithMetrics()) {
             Processor processor = processorWithMetric.v1();
             OperationMetrics metric = processorWithMetric.v2();
-            if (processor instanceof CompoundProcessor) {
-                getProcessorMetrics((CompoundProcessor) processor, processorMetrics);
+            if (processor instanceof CompoundProcessor compoundProc) {
+                getProcessorMetrics(compoundProc, processorMetrics);
             } else {
                 // Prefer the conditional's metric since it only includes metrics when the conditional evaluated to true.
-                if (processor instanceof ConditionalProcessor) {
-                    metric = ((ConditionalProcessor) processor).getMetric();
+                if (processor instanceof ConditionalProcessor conditionalProc) {
+                    metric = conditionalProc.getMetric();
                 }
                 processorMetrics.add(new Tuple<>(processor, metric));
             }
@@ -830,6 +829,22 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                 runBulkRequestInBatch(numberOfActionRequests, actionRequests, onFailure, onCompletion, onDropped);
             }
         });
+    }
+
+    /**
+     * Same as {@link #executeBulkRequest} but executes synchronously on the calling thread
+     * without dispatching to a thread pool. This is intended for use by pull-based ingestion
+     * where dedicated processor threads can safely block. Do not invoke from a TransportAction
+     * or request thread — use {@link #executeBulkRequest} instead.
+     */
+    public void executeBulkRequestSync(
+        int numberOfActionRequests,
+        Iterable<DocWriteRequest<?>> actionRequests,
+        BiConsumer<Integer, Exception> onFailure,
+        BiConsumer<Thread, Exception> onCompletion,
+        IntConsumer onDropped
+    ) {
+        runBulkRequestInBatch(numberOfActionRequests, actionRequests, onFailure, onCompletion, onDropped);
     }
 
     private void runBulkRequestInBatch(
@@ -1266,9 +1281,12 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         final PipelineHolder holder = pipelines.get(pipelineId);
         if (IngestPipelineType.SYSTEM_FINAL.equals(pipelineType)) {
             Pipeline indexPipeline = systemIngestPipelineCache.getSystemIngestPipeline(pipelineId);
-            // In very edge case it is possible the cache is invalidated after we resolve the
-            // pipeline. So try to resolve the system ingest pipeline again here.
+            // In some edge cases it is possible the cache is invalidated after we resolve the
+            // pipeline or the request is forwarded from a non-ingest node. In that case we should try to resolve the
+            // system ingest pipeline on this node one more time.
             if (indexPipeline == null) {
+                // reset isPipelineResolved as false so that we can resolve it again
+                indexRequest.isPipelineResolved(false);
                 resolveSystemIngestPipeline(actionRequest, indexRequest, state.metadata());
                 final String newPipelineId = indexRequest.getSystemIngestPipeline();
                 // set it as NOOP to avoid duplicated execution after we switch back to the write thread
@@ -1333,14 +1351,14 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
     // package private for testing
     static String getProcessorName(Processor processor) {
         // conditionals are implemented as wrappers around the real processor, so get the real processor for the correct type for the name
-        if (processor instanceof ConditionalProcessor) {
-            processor = ((ConditionalProcessor) processor).getInnerProcessor();
+        if (processor instanceof ConditionalProcessor conditionalProc) {
+            processor = conditionalProc.getInnerProcessor();
         }
         StringBuilder sb = new StringBuilder(5);
         sb.append(processor.getType());
 
-        if (processor instanceof PipelineProcessor) {
-            String pipelineName = ((PipelineProcessor) processor).getPipelineTemplate().newInstance(Collections.emptyMap()).execute();
+        if (processor instanceof PipelineProcessor pipelineProc) {
+            String pipelineName = pipelineProc.getPipelineTemplate().newInstance(Collections.emptyMap()).execute();
             sb.append(":");
             sb.append(pipelineName);
         }
@@ -1376,8 +1394,8 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         Map<String, Object> sourceAsMap = indexRequest.sourceAsMap();
         IngestDocument ingestDocument = new IngestDocument(index, id, routing, version, versionType, sourceAsMap);
         ingestDocument.executePipeline(pipeline, (result, e) -> {
-            long ingestTimeInMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeInNanos);
-            totalMetrics.after(ingestTimeInMillis);
+            long ingestTimeInNanos = System.nanoTime() - startTimeInNanos;
+            totalMetrics.after(ingestTimeInNanos);
             if (e != null) {
                 totalMetrics.failed();
                 handler.accept(e);
@@ -1421,8 +1439,8 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
             if (results.isEmpty()) return;
             allResults.addAll(results);
             if (counter.addAndGet(-results.size()) == 0) {
-                long ingestTimeInMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeInNanos);
-                totalMetrics.afterN(size, ingestTimeInMillis);
+                long ingestTimeInNanos = System.nanoTime() - startTimeInNanos;
+                totalMetrics.afterN(size, ingestTimeInNanos);
                 List<IngestDocumentWrapper> succeeded = new ArrayList<>();
                 List<IngestDocumentWrapper> dropped = new ArrayList<>();
                 List<IngestDocumentWrapper> exceptions = new ArrayList<>();
@@ -1608,8 +1626,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                 processors.add(clazz.cast(processor));
             }
 
-            while (processor instanceof WrappingProcessor) {
-                WrappingProcessor wrappingProcessor = (WrappingProcessor) processor;
+            while (processor instanceof WrappingProcessor wrappingProcessor) {
                 if (clazz.isAssignableFrom(wrappingProcessor.getInnerProcessor().getClass())) {
                     processors.add(clazz.cast(wrappingProcessor.getInnerProcessor()));
                 }

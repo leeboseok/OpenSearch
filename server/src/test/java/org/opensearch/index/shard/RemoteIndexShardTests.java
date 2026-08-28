@@ -60,7 +60,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
-import static org.opensearch.common.util.FeatureFlags.MERGED_SEGMENT_WARMER_EXPERIMENTAL_FLAG;
 import static org.opensearch.index.engine.EngineTestCase.assertAtMostOneLuceneDocumentPerSequenceNumber;
 import static org.opensearch.index.shard.RemoteStoreRefreshListener.EXCLUDE_FILES;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -157,7 +156,7 @@ public class RemoteIndexShardTests extends SegmentReplicationIndexShardTests {
             oldPrimary.close("demoted", false, false);
             oldPrimary.store().close();
 
-            assertEquals(InternalEngine.class, nextPrimary.getEngine().getClass());
+            assertEquals(InternalEngine.class, getEngine(nextPrimary).getClass());
             assertDocCounts(nextPrimary, totalDocs, totalDocs);
 
             // refresh and push segments to our other replica.
@@ -194,7 +193,7 @@ public class RemoteIndexShardTests extends SegmentReplicationIndexShardTests {
         CountDownLatch latch = new CountDownLatch(1);
         shards.promoteReplicaToPrimary(replicaShard, (shard, listener) -> {
             try {
-                assertAtMostOneLuceneDocumentPerSequenceNumber(replicaShard.getEngine());
+                assertAtMostOneLuceneDocumentPerSequenceNumber(getEngine(replicaShard));
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
@@ -629,7 +628,6 @@ public class RemoteIndexShardTests extends SegmentReplicationIndexShardTests {
         }
     }
 
-    @LockFeatureFlag(MERGED_SEGMENT_WARMER_EXPERIMENTAL_FLAG)
     @Override
     @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/pull/18255")
     public void testMergedSegmentReplication() throws Exception {
@@ -637,12 +635,24 @@ public class RemoteIndexShardTests extends SegmentReplicationIndexShardTests {
         super.testMergedSegmentReplication();
     }
 
-    @LockFeatureFlag(MERGED_SEGMENT_WARMER_EXPERIMENTAL_FLAG)
+    @Override
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/pull/19436")
+    public void testMergedSegmentReplicationWithException() throws Exception {
+        // TODO: wait for remote store to support merged segment warmer
+        super.testMergedSegmentReplicationWithException();
+    }
+
     @Override
     @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/pull/18255")
     public void testMergedSegmentReplicationWithZeroReplica() throws Exception {
         // TODO: wait for remote store to support merged segment warmer
         super.testMergedSegmentReplicationWithZeroReplica();
+    }
+
+    @Override
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/pull/18720")
+    public void testCleanupRedundantPendingMergeSegment() throws Exception {
+        super.testCleanupRedundantPendingMergeSegment();
     }
 
     private RemoteStoreReplicationSource getRemoteStoreReplicationSource(IndexShard shard, Runnable postGetFilesRunnable) {

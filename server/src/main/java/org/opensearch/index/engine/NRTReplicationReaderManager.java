@@ -83,7 +83,8 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
             referenceToRefresh.directory(),
             currentInfos,
             subs,
-            engineConfig.getLeafSorter()
+            engineConfig.getLeafSorter(),
+            null
         );
         final DirectoryReader softDeletesDirectoryReaderWrapper = new SoftDeletesDirectoryReaderWrapper(
             innerReader,
@@ -121,8 +122,8 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
 
     public static StandardDirectoryReader unwrapStandardReader(OpenSearchDirectoryReader reader) {
         final DirectoryReader delegate = reader.getDelegate();
-        if (delegate instanceof SoftDeletesDirectoryReaderWrapper) {
-            return (StandardDirectoryReader) ((SoftDeletesDirectoryReaderWrapper) delegate).getDelegate();
+        if (delegate instanceof SoftDeletesDirectoryReaderWrapper softDeletesWrapper) {
+            return (StandardDirectoryReader) softDeletesWrapper.getDelegate();
         }
         return (StandardDirectoryReader) delegate;
     }

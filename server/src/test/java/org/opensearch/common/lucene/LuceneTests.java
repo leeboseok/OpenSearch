@@ -60,6 +60,7 @@ import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.ScorerSupplier;
+import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.search.SortedSetSelector;
@@ -77,11 +78,13 @@ import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.index.fielddata.IndexFieldData;
+import org.opensearch.index.fielddata.IndexFieldData.XFieldComparatorSource;
 import org.opensearch.index.fielddata.fieldcomparator.BytesRefFieldComparatorSource;
 import org.opensearch.index.fielddata.fieldcomparator.DoubleValuesComparatorSource;
 import org.opensearch.index.fielddata.fieldcomparator.FloatValuesComparatorSource;
 import org.opensearch.index.fielddata.fieldcomparator.IntValuesComparatorSource;
 import org.opensearch.index.fielddata.fieldcomparator.LongValuesComparatorSource;
+import org.opensearch.index.fielddata.plain.NonPruningSortedSetOrdinalsIndexFieldData;
 import org.opensearch.search.MultiValueMode;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.test.VersionUtils;
@@ -154,12 +157,28 @@ public class LuceneTests extends OpenSearchTestCase {
         dir.close();
     }
 
-    public void testPruneUnreferencedFiles() throws IOException {
+    public void testPruneUnreferencedFilesWithIndexSort() throws IOException {
         MockDirectoryWrapper dir = newMockDirectory();
         IndexWriterConfig iwc = newIndexWriterConfig();
         iwc.setIndexDeletionPolicy(NoDeletionPolicy.INSTANCE);
         iwc.setMergePolicy(NoMergePolicy.INSTANCE);
         iwc.setMaxBufferedDocs(2);
+        iwc.setParentField(Lucene.PARENT_FIELD);
+        iwc.setIndexSort(new Sort(new SortedSetSortField("foo1", false)));
+        testPruneUnreferencedFiles(iwc, dir, true);
+    }
+
+    public void testPruneUnreferencedFilesWithoutIndexSort() throws IOException {
+        MockDirectoryWrapper dir = newMockDirectory();
+        IndexWriterConfig iwc = newIndexWriterConfig();
+        iwc.setIndexDeletionPolicy(NoDeletionPolicy.INSTANCE);
+        iwc.setMergePolicy(NoMergePolicy.INSTANCE);
+        iwc.setMaxBufferedDocs(2);
+        testPruneUnreferencedFiles(iwc, dir, false);
+    }
+
+    private void testPruneUnreferencedFiles(IndexWriterConfig iwc, Directory dir, boolean isParentFieldEnabled) throws IOException {
+
         IndexWriter writer = new IndexWriter(dir, iwc);
         Document doc = new Document();
         doc.add(new TextField("id", "1", random().nextBoolean() ? Field.Store.YES : Field.Store.NO));
@@ -189,7 +208,7 @@ public class LuceneTests extends OpenSearchTestCase {
         assertEquals(4, open.maxDoc());
         open.close();
         writer.close();
-        SegmentInfos si = Lucene.pruneUnreferencedFiles(segmentCommitInfos.getSegmentsFileName(), dir);
+        SegmentInfos si = Lucene.pruneUnreferencedFiles(segmentCommitInfos.getSegmentsFileName(), dir, isParentFieldEnabled);
         assertEquals(si.getSegmentsFileName(), segmentCommitInfos.getSegmentsFileName());
         open = DirectoryReader.open(dir);
         assertEquals(3, open.numDocs());
@@ -208,6 +227,39 @@ public class LuceneTests extends OpenSearchTestCase {
         open.close();
         dir.close();
 
+    }
+
+    public void testPruneUnreferencedFilesThrowsParentException() throws Exception {
+        MockDirectoryWrapper dir = newMockDirectory();
+        IndexWriterConfig iwc = newIndexWriterConfig();
+        iwc.setIndexDeletionPolicy(NoDeletionPolicy.INSTANCE);
+        iwc.setMergePolicy(NoMergePolicy.INSTANCE);
+        iwc.setMaxBufferedDocs(2);
+        iwc.setParentField(Lucene.PARENT_FIELD);
+        iwc.setIndexSort(new Sort(new SortedSetSortField("foo1", false)));
+
+        SegmentInfos commitInfos;
+
+        try (IndexWriter writer = new IndexWriter(dir, iwc)) {
+            Document doc1 = new Document();
+            doc1.add(new TextField("id", "1", TextField.Store.YES));
+            writer.addDocument(doc1);
+            writer.commit();
+
+            Document doc2 = new Document();
+            doc2.add(new TextField("id", "2", TextField.Store.YES));
+            writer.addDocument(doc2);
+            writer.commit();
+
+            commitInfos = SegmentInfos.readLatestCommit(dir);
+
+            writer.close();
+        }
+
+        // assert pruneUnreferencedFiles throws the nested parent exception
+        assertThrows(IllegalArgumentException.class, () -> Lucene.pruneUnreferencedFiles(commitInfos.getSegmentsFileName(), dir, false));
+
+        dir.close();
     }
 
     public void testFiles() throws IOException {
@@ -580,6 +632,44 @@ public class LuceneTests extends OpenSearchTestCase {
             VersionUtils.randomVersion(random())
         );
         assertEquals(sortFieldTuple.v2(), deserialized);
+    }
+
+    public void testNonpruningSortFieldSerialization() throws IOException {
+        NonPruningSortedSetOrdinalsIndexFieldData fieldData = new NonPruningSortedSetOrdinalsIndexFieldData(
+            null,
+            "field",
+            null,
+            null,
+            null
+        );
+
+        SortField nonPruningSortedSetField = fieldData.sortField(null, MultiValueMode.MAX, null, true);
+        SortField expected = new SortField(
+            nonPruningSortedSetField.getField(),
+            SortField.Type.STRING,
+            nonPruningSortedSetField.getReverse()
+        );
+        expected.setMissingValue(SortField.STRING_FIRST);
+        SortField deserialized1 = copyInstance(
+            nonPruningSortedSetField,
+            EMPTY_REGISTRY,
+            Lucene::writeSortField,
+            Lucene::readSortField,
+            VersionUtils.randomVersion(random())
+        );
+        assertEquals(expected, deserialized1);
+
+        SortField nonPruningSortField = fieldData.sortField(SortField.STRING_FIRST, MultiValueMode.SUM, null, true);
+        XFieldComparatorSource source = new BytesRefFieldComparatorSource(null, SortField.STRING_FIRST, MultiValueMode.SUM, null);
+        expected = new SortField(nonPruningSortField.getField(), source.reducedType(), nonPruningSortField.getReverse());
+        SortField deserialized2 = copyInstance(
+            nonPruningSortField,
+            EMPTY_REGISTRY,
+            Lucene::writeSortField,
+            Lucene::readSortField,
+            VersionUtils.randomVersion(random())
+        );
+        assertEquals(expected, deserialized2);
     }
 
     public void testSortValueSerialization() throws IOException {

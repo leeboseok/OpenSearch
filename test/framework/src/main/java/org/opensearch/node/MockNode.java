@@ -37,6 +37,7 @@ import org.opensearch.cluster.ClusterInfoService;
 import org.opensearch.cluster.MockInternalClusterInfoService;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.network.NetworkModule;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
@@ -66,11 +67,13 @@ import org.opensearch.tasks.TaskResourceTrackingService;
 import org.opensearch.telemetry.tracing.Tracer;
 import org.opensearch.test.MockHttpTransport;
 import org.opensearch.test.transport.MockTransportService;
+import org.opensearch.test.transport.StubbableTransport;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportInterceptor;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.node.NodeClient;
+import org.opensearch.wlm.WorkloadGroupService;
 
 import java.nio.file.Path;
 import java.util.Collection;
@@ -174,7 +177,8 @@ public class MockNode extends Node {
         Executor indexSearcherExecutor,
         TaskResourceTrackingService taskResourceTrackingService,
         Collection<ConcurrentSearchRequestDecider.Factory> concurrentSearchDeciderFactories,
-        List<SearchPlugin.ProfileMetricsProvider> pluginProfilers
+        List<SearchPlugin.ProfileMetricsProvider> pluginProfilers,
+        WorkloadGroupService workloadGroupService
     ) {
         if (getPluginsService().filterPlugins(MockSearchService.TestPlugin.class).isEmpty()) {
             return super.newSearchService(
@@ -190,7 +194,8 @@ public class MockNode extends Node {
                 indexSearcherExecutor,
                 taskResourceTrackingService,
                 concurrentSearchDeciderFactories,
-                pluginProfilers
+                pluginProfilers,
+                workloadGroupService
             );
         }
         return new MockSearchService(
@@ -203,7 +208,8 @@ public class MockNode extends Node {
             fetchPhase,
             circuitBreakerService,
             indexSearcherExecutor,
-            taskResourceTrackingService
+            taskResourceTrackingService,
+            workloadGroupService
         );
     }
 
@@ -216,9 +222,29 @@ public class MockNode extends Node {
     }
 
     @Override
+    protected Transport wrapStreamTransport(@Nullable Transport streamTransport) {
+        if (streamTransport == null) return null;
+        // Only wrap when MockTransportService is actually in use; otherwise
+        // the regular transport stays unwrapped and we shouldn't wrap stream
+        // either (no one will look up the wrapped registry).
+        if (getPluginsService().filterPlugins(MockTransportService.TestPlugin.class).isEmpty()) {
+            return streamTransport;
+        }
+        // Same StubbableTransport used for the regular transport — both end
+        // up sharing the same stub-discovery semantics. Wrapping here means
+        // both this wrapped instance and the StreamTransportService Node
+        // builds will see the same wrapper, so handlers registered on
+        // StreamTransportService land in StubbableTransport's delegate
+        // request-handler registry — which addRequestHandlingBehavior can
+        // then see.
+        return new StubbableTransport(streamTransport);
+    }
+
+    @Override
     protected TransportService newTransportService(
         Settings settings,
         Transport transport,
+        @Nullable Transport streamTransport,
         ThreadPool threadPool,
         TransportInterceptor interceptor,
         Function<BoundTransportAddress, DiscoveryNode> localNodeFactory,
@@ -234,6 +260,7 @@ public class MockNode extends Node {
             return super.newTransportService(
                 settings,
                 transport,
+                streamTransport,
                 threadPool,
                 interceptor,
                 localNodeFactory,
@@ -245,6 +272,7 @@ public class MockNode extends Node {
             return new MockTransportService(
                 settings,
                 transport,
+                streamTransport,
                 threadPool,
                 interceptor,
                 localNodeFactory,
